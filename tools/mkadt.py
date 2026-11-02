@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
 # Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
+# DIPPER: verify both banks against the live FDT memory nodes before boot.
 PHYS_BASE = 0xb0000000
 MEM_SIZE = 0x4d000000
 # Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
@@ -18,21 +19,23 @@ MEM_SIZE = 0x4d000000
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
-# --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
-# <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
-# carve-out is in the low bank and the dynamic pools are limited below 4G.
+# --highmem (phone only): the upper DDR bank. DIPPER TODO: sdm845 6 GB layout
+# assumed <0x80000000 2G> + <0x1_00000000 6G>; confirm the second node's real
+# base/size on the phone (live FDT) — all sdm845 carve-outs are in the low bank
+# (hyp@85700000, ramoops@b0000000, cont_splash@9d400000, removed@85fc0000).
 HIGH_PHYS_BASE = 0x100000000
-HIGH_MEM_SIZE = 0xfcc00000
+HIGH_MEM_SIZE = 0x180000000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
-GICD, GICD_SIZE = 0x17a00000, 0x10000
-GICR, GICR_SIZE = 0x17a60000, 0x100000
-FB, FB_SIZE = 0x9c000000, 0x1700000
-SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
-FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
+GICD, GICD_SIZE = 0x17a00000, 0x10000        # same as SM7150 (sdm845.dtsi intc@17a00000)
+GICR, GICR_SIZE = 0x17a60000, 0x100000      # redistributor-stride 0x20000, 8 cores
+FB, FB_SIZE = 0x9d400000, 0x2400000         # cont_splash_region@9d400000 (sdm845.dtsi)
+SWEET_ECID = 0x5254455050494401             # 'RTEPPID' + 1 synthetic; keep shape
+FB_W, FB_H, FB_STRIDE = 1080, 2248, 1080 * 4  # dipper: 1080x2248 ea8074 AMOLED
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
-UFS, UFS_SIZE = 0x01d84000, 0x3000
+# DIPPER: identical base to SM7150; dtsi reg size is 0x2500
+UFS, UFS_SIZE = 0x01d84000, 0x2500
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -149,7 +152,9 @@ def build(seed=None, qemu=False, highmem=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            # dipper: cpu0-3 Kryo 385 Silver ~1.77 GHz, cpu4-7 Gold ~2.80 GHz;
+            # MPIDRs are 0x000-0x300 / 0x400-0x700, matching reg = core << 8.
+            ('clock-frequency', u32(2803200000 if core >= 4 else 1766400000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -228,10 +233,11 @@ def build(seed=None, qemu=False, highmem=False):
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
-    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
+    # (iPhone10,3). 'xiaomi,sweet' stays so SweetPlatformExpert still matches;
+    # 'xiaomi,dipper'/'qcom,sdm845' added for dipper-specific drivers.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('xiaomi,dipper') + cstr('qcom,sdm845') + cstr('qcom,sm7150') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
