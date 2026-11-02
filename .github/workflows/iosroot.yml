@@ -76,7 +76,8 @@ jobs:
       - name: Fetch ipsw binary (dmg partition extractor)
         run: |
           url=$(curl -sL https://api.github.com/repos/blacktop/ipsw/releases/latest |
-                jq -r '.assets[].browser_download_url | select(test("linux_amd64\\.tar\\.gz$"))' | head -1)
+                jq -r '.assets[].browser_download_url | select(test("^.*ipsw_[0-9.]+_linux_x86_64\\.tar\\.gz$"))' | head -1)
+          [ -n "$url" ] || { echo 'no ipsw linux asset found'; exit 1; }
           echo "ipsw: $url"
           curl -sL "$url" -o /tmp/ipsw.tgz
           mkdir -p /tmp/ipsw-bin && tar xzf /tmp/ipsw.tgz -C /tmp/ipsw-bin
