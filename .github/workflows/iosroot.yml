@@ -1,0 +1,146 @@
+name: iosroot
+
+# Builds the SWEET iOS root image (journaled case-sensitive HFS+ holding the
+# OS root + SystemOS/App cryptexes) for the userdata partition, from the
+# public iPhone10,3 16.7.16 IPSW. Uploads the gzipped image, split into
+# <2 GiB parts, to a GitHub release so it can be fetched without auth.
+#
+# Local use: download iosroot.img.gz.part_* + sha256, `cat part_* > img.gz`,
+# `gunzip img.gz`, then write the raw image to userdata (EDL `w userdata`).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: iPhone10,3 16.7.16 restore IPSW URL
+        default: 'https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw'
+      os_dmg:
+        description: OS (rootfs) dmg inside the IPSW
+        default: '087-86698-044.dmg'
+      sysos_dmg:
+        description: SystemOS cryptex dmg
+        default: '087-86593-047.dmg'
+      appos_dmg:
+        description: App cryptex dmg
+        default: '087-86715-047.dmg'
+      img_size:
+        description: HFS+ image size
+        default: '16G'
+      tag:
+        description: release tag to upload the image to
+        default: 'iosroot-v1'
+
+concurrency:
+  group: iosroot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/lib/mono /opt/hostedtoolcache /usr/share/swift || true
+          docker image prune -af 2>/dev/null || true
+          df -h /
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            hfsprogs rsync fuse3 libfuse3-dev libfuse-dev \
+            cmake g++ make zlib1g-dev libbz2-dev liblz4-dev pkg-config \
+            pigz curl unzip jq ca-certificates
+
+      - name: Build lzfse
+        run: |
+          git clone --depth 1 https://github.com/lzfse/lzfse /tmp/lzfse
+          cmake -S /tmp/lzfse -B /tmp/lzfse/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local
+          sudo cmake --build /tmp/lzfse/build --target install -j"$(nproc)"
+          sudo ldconfig
+
+      - name: Build apfs-fuse
+        run: |
+          git clone --depth 1 https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+          cd /tmp/apfs-fuse && git submodule update --init --depth 1
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build build -j"$(nproc)"
+          sudo cmake --install build || sudo make -C build install
+          command -v apfs-fuse
+
+      - name: Fetch ipsw binary (dmg partition extractor)
+        run: |
+          url=$(curl -sL https://api.github.com/repos/blacktop/ipsw/releases/latest |
+                jq -r '.assets[].browser_download_url | select(test("linux_amd64\\.tar\\.gz$"))' | head -1)
+          echo "ipsw: $url"
+          curl -sL "$url" -o /tmp/ipsw.tgz
+          mkdir -p /tmp/ipsw-bin && tar xzf /tmp/ipsw.tgz -C /tmp/ipsw-bin
+          sudo install -m755 "$(find /tmp/ipsw-bin -name ipsw -type f | head -1)" /usr/local/bin/ipsw
+          ipsw version || true
+
+      - name: Download IPSW and extract the three DMGs
+        run: |
+          curl -L --retry 3 --retry-delay 10 -o Restore.ipsw '${{ inputs.ipsw_url }}'
+          unzip -o Restore.ipsw BuildManifest.plist -d dmgs
+          python3 - <<'EOF'
+          import plistlib, os
+          m = plistlib.load(open('dmgs/BuildManifest.plist','rb'))
+          bi = m['BuildIdentities']
+          # Combined iPhone10,3/10,6 IPSWs share the rootfs/cryptex dmgs; prefer
+          # the d22ap (iPhone10,3) identity but fall back to the first entry.
+          ident = next((b for b in bi if b['Info'].get('DeviceClass') == 'd22ap'), bi[0])
+          man = ident['Manifest']
+          paths = [man[k]['Info']['Path'] for k in
+                   ('OS','Cryptex1,SystemOS','Cryptex1,AppOS')]
+          open('/tmp/dmglist','w').write('\n'.join(paths))
+          print('dmgs:', paths)
+          EOF
+          mapfile -t DMGS < /tmp/dmglist
+          unzip -o Restore.ipsw "${DMGS[@]}" -d dmgs
+          rm -f Restore.ipsw
+          ln -f "dmgs/${DMGS[0]}" os_dmg
+          ln -f "dmgs/${DMGS[1]}" sysos_dmg
+          ln -f "dmgs/${DMGS[2]}" appos_dmg
+          ls -la dmgs && df -h .
+
+      - name: Extract OS APFS partition to raw
+        run: |
+          ipsw disk dmg "$PWD/os_dmg" -p 3 -o "$PWD/apfs.raw"
+          ls -la apfs.raw
+
+      - name: Build HFS+ root image
+        run: |
+          bash tools/mkiosroot.sh "$PWD/apfs.raw" \
+            "$PWD/sysos_dmg" "$PWD/appos_dmg" \
+            iosroot.img '${{ inputs.img_size }}'
+
+      - name: Apply SWEET root tweaks
+        run: |
+          mkdir -p mnt
+          sudo fsck.hfsplus -fy iosroot.img
+          sudo mount -t hfsplus -o loop,force iosroot.img mnt
+          sudo python3 tools/sweet-root-tweaks.py mnt
+          sudo python3 tools/patch-launchd-plist.py \
+            mnt/System/Library/xpc/launchd.plist /tmp/launchd.plist \
+            com.apple.backboardd com.apple.SpringBoard
+          sudo cp /tmp/launchd.plist mnt/System/Library/xpc/launchd.plist
+          sync
+          sudo umount mnt
+          sudo fsck.hfsplus -fy iosroot.img
+
+      - name: Package and upload release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha256sum iosroot.img | tee iosroot.img.sha256
+          pigz -k -6 iosroot.img
+          split -b 1900m -d iosroot.img.gz iosroot.img.gz.part_
+          ls -la iosroot.img.gz.part_*
+          gh release create '${{ inputs.tag }}' iosroot.img.gz.part_* iosroot.img.sha256 \
+            -t '${{ inputs.tag }}' \
+            -n 'SWEET iOS 16.7.16 HFS+ root (rd=ufsroot0). cat parts -> gunzip -> raw image for userdata.'

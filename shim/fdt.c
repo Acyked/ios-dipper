@@ -36,6 +36,68 @@ static uintptr_t skip_str(uintptr_t p)
 	return p + 1;
 }
 
+static int starts_with(const char *s, const char *prefix)
+{
+	while (*prefix && *s++ == *prefix++)
+		;
+	return !*prefix;
+}
+
+int fdt_memory_regs(uintptr_t fdt, uint64_t *pairs, int max_pairs)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uintptr_t p = fdt + be32(fdt + 8);
+	uintptr_t strings = fdt + be32(fdt + 12);
+	int depth = 0, in_mem = 0, n = 0;
+	uint32_t ac = 2, sc = 2;
+
+	for (;;) {
+		uint32_t tok = be32(p);
+		p += 4;
+		switch (tok) {
+		case FDT_BEGIN_NODE: {
+			const char *name = (const char *)p;
+			depth++;
+			in_mem = depth == 2 && starts_with(name, "memory");
+			p = align4(skip_str(p));
+			break;
+		}
+		case FDT_END_NODE:
+			in_mem = 0;
+			depth--;
+			break;
+		case FDT_PROP: {
+			uint32_t len = be32(p), nameoff = be32(p + 4);
+			uintptr_t val = p + 8;
+			const char *pn = (const char *)(strings + nameoff);
+			if (depth == 1 && streq(pn, "#address-cells") && len == 4)
+				ac = be32(val);
+			else if (depth == 1 && streq(pn, "#size-cells") && len == 4)
+				sc = be32(val);
+			else if (in_mem && streq(pn, "reg")) {
+				uintptr_t q = val, end = val + len;
+				while (q < end && n < 2 * max_pairs) {
+					uint64_t a, s;
+					if (ac == 2) { a = (uint64_t)be32(q) << 32 | be32(q + 4); q += 8; }
+					else { a = be32(q); q += 4; }
+					if (sc == 2) { s = (uint64_t)be32(q) << 32 | be32(q + 4); q += 8; }
+					else { s = be32(q); q += 4; }
+					pairs[n++] = a;
+					pairs[n++] = s;
+				}
+			}
+			p = align4(val + len);
+			break;
+		}
+		case FDT_NOP:
+			break;
+		default:
+			return n / 2;
+		}
+	}
+}
+
 int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
 {
 	if (!fdt || be32(fdt) != FDT_MAGIC)

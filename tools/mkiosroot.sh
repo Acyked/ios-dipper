@@ -58,13 +58,16 @@ cleanup() {
 trap cleanup EXIT
 
 # apfs-fuse splits its options on ',' (e.g. in iPhone10,3 paths): use links.
-# Keep the .dmg name: apfs-fuse only parses UDIF images (the OS one is UDIF,
-# the cryptexes are raw APFS) when the file name ends in .dmg.
+# Keep the .dmg name only for real UDIF images (koly trailer): apfs-fuse tries
+# a UDIF parse when the file name ends in .dmg and treats anything else as a
+# raw APFS container (e.g. a GPT partition extracted with `ipsw disk dmg -p`).
 apfs_mount() {
-	ln -s "$1" "$work/$2.dmg"
+	local ext=raw
+	tail -c 512 "$1" | grep -aq koly && ext=dmg
+	ln -s "$1" "$work/$2.$ext"
 	mkdir "$work/$2"
 	# As root: a user's FUSE mount is unreadable to the root rsync below.
-	sudo "$(command -v apfs-fuse)" "$work/$2.dmg" "$work/$2"
+	sudo "$(command -v apfs-fuse)" "$work/$2.$ext" "$work/$2"
 	mounts+=("$work/$2")
 }
 apfs_mount "$os" os

@@ -1,6 +1,30 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> DIPPER (Xiaomi Mi 8, SDM845) handoff — 2026-11-02 <<<
+## >>> DIPPER (Xiaomi Mi 8, SDM845) handoff — 2026-11-03 <<<
+
+**STATE: XNU FULLY BOOTS — 8 CPUs, VM, IOKit, UFS, display all up. Blocker = no iOS rootfs: kernel loops on `cannot mount root, errno = 19` against Android `userdata`. Rootfs pipeline ready, proxy needed to push/trigger CI.**
+
+**Progress since 11-02 (all observed via persistent kernel log on userdata, not guesses):**
+- Wrong RAM layout was the 11-02 hang: real ABL FDT memory is `0x80000000+0x80000000` (2 GiB) + `0x180000000+0x100000000` (4 GiB) = 6 GiB; old ADT claimed `0x100000000`+6 GiB (overlapped reserved/hypervisor space). `mkadt.py` now `HIGH_PHYS_BASE=0x180000000`, `HIGH_MEM_SIZE=0xFCAC0000`. XNU entry relocates to `0xfffffe000748b488` / pa `0x18148b488`.
+- Kernel boots to BSD: `Darwin Kernel Version 22.6.0`, all **8 CPUs** up (SGI-verified), VM/MAC/IOKit/Skywalk init, AppleCLCD display driver registers, **SWEET UFS sees `userdata` on LUN0 (`first block 0x60000`, 115799 MiB, read-write)**, persistent console log flush to last ~4 MiB of userdata works (read back via EDL).
+- Root mount fails as expected: `hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature : 20` → `hfs_mountfs error=22` → `cannot mount root, errno = 19` retry loop. Android ext4 userdata is not an HFS+ root.
+
+**Rootfs image pipeline (user approved wiping userdata, Android data gone permanently):**
+- Local IPSW `C:\ios-dipper\iPhone10,3_16.7.16_20H392_Restore.ipsw`; `C:\tools\ipsw.exe`.
+- Extracted already (keep, do NOT commit): `C:\ios-dipper\rootfs\apfs.raw` = OS partition 3 of `087-86698-044.dmg` (5.6 GB, NXSB raw APFS, via `ipsw disk dmg X -p 3 -o apfs.raw`); `C:\ios-dipper\rootfs\087-86593-047.dmg` (SystemOS cryptex, raw APFS) + `087-86715-047.dmg` (App cryptex, raw APFS). The .dmg files are `bvxn` containers; partition 3 = raw APFS.
+- `.github/workflows/iosroot.yml` (new): ubuntu-latest builds lzfse+apfs-fuse+hfsprogs, downloads the IPSW itself (Apple CDN URL hardcoded as input default), extracts same 3 dmgs + OS partition, runs `tools/mkiosroot.sh apfs.raw SYSOS APPOS iosroot.img 16G`, then `tools/sweet-root-tweaks.py` (v8–v14 fixes) + `patch-launchd-plist.py` console paths for backboardd/SpringBoard, fsck, pigz, split <1.9 GB → `gh release create iosroot-v1`. Trigger via workflow_dispatch on branch `dipper`.
+- `mkiosroot.sh` patched: `apfs_mount` picks link suffix by `koly` magic (UDIF→`.dmg`, raw APFS→`.raw`) — needed because our inputs are raw APFS, not UDIF.
+- After run: download release parts, `cat part_* > iosroot.img.gz`, gunzip → 16 GiB raw img, `edl.py w userdata iosroot.img` (writes at partition start; ufsroot0 = whole userdata).
+- Boot args for first rootfs boot: `debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1` (drop serial to 0 later if console floods).
+
+**Blocked right now:** user's proxy (127.0.0.1:7897) is OFF → github.com unreachable → can't push/trigger Actions. Everything below the 11-02 marker is older state.
+
+**Next steps for dipper:**
+1. Proxy on → `git push fork dipper` → trigger `iosroot` workflow → download `iosroot-v1` release → write to userdata via EDL → boot.
+2. Verify `hfs` mount in kernel log → watch launchd/userspace (console logging patched into image for backboardd/SpringBoard).
+3. Then display/backboardd (patch level of our kernel vs upstream 0077s determines what works).
+
+## >>> DIPPER handoff — 2026-11-02 (superseded, kept for history) <<<
 
 **STATE: XNU kernel entry REACHED on dipper.** Verified by UFS debug log + on-screen XNU kprintf text.
 

@@ -11,6 +11,7 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#include "fdt.h"
 
 #define IMEM_RESTART_REASON	0x146bf65cUL	/* dipper: msm-imem@146bf000 + 65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -387,6 +388,14 @@ void shim_main(uint64_t dtb)
 	dbg(1, dtb);
 	dbg(2, 0x5354414745ULL);	/* 'STAGE' */
 	dbg(0xA, ufs_log_init());	/* UFS log channel up? rc shown in ulog[0xA] */
+	/* Live-FDT /memory banks -> ulog[0x40..0x4e], count at 0x4f. */
+	uint64_t mr[16];
+	int nm = fdt_memory_regs(dtb, mr, 8);
+	for (int i = 0; i < nm * 2 && i < 0xe; i++)
+		dbg(0x40 + i, mr[i]);
+	dbg(0x4f, nm);
+	dbg(0x50, rsr("CurrentEL"));
+	dbg(0x51, rsr("sctlr_el1"));
 	con_clear(RED);
 	dbg(3, 0x434f4e53545ULL);	/* 'CONST' console survived */
 	con_str("SHIM", "sweet milestone 4: xnu loader");

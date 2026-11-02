@@ -19,12 +19,11 @@ MEM_SIZE = 0x4d000000
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
-# --highmem (phone only): the upper DDR bank. DIPPER TODO: sdm845 6 GB layout
-# assumed <0x80000000 2G> + <0x1_00000000 6G>; confirm the second node's real
-# base/size on the phone (live FDT) — all sdm845 carve-outs are in the low bank
-# (hyp@85700000, ramoops@b0000000, cont_splash@9d400000, removed@85fc0000).
-HIGH_PHYS_BASE = 0x100000000
-HIGH_MEM_SIZE = 0x180000000
+# --highmem (phone only): the upper DDR bank. DIPPER: live FDT on the retail
+# unit shows banks {0x80000000,2G} + {0x180000000,0xfcac0000}; the range
+# 0x100000000-0x180000000 is hypervisor-reserved, NOT usable.
+HIGH_PHYS_BASE = 0x180000000
+HIGH_MEM_SIZE = 0xfcac0000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
