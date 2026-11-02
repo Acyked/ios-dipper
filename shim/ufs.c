@@ -80,11 +80,12 @@ static uint32_t be32(const uint8_t *p)
 }
 
 /*
- * Issue one SCSI command (read direction or no data) in slot 0.
+ * Issue one SCSI command in slot 0.
+ * dir: 0 = no data, 1 = read (dev->host), 2 = write (host->dev).
  * Returns 0 on success, otherwise a code describing the failure stage.
  */
-static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
-    uint32_t *ocs_out, uint32_t *status_out)
+static uint32_t scsi_dir(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
+    uint32_t *ocs_out, uint32_t *status_out, unsigned dir)
 {
 	static uint8_t tag;
 	zero(&utrl[0], sizeof(utrl[0]));
@@ -92,7 +93,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	/* Command UPIU: header (12 bytes), expected length, CDB. */
 	ucd.cmd[0] = 0x01;			/* transaction type: COMMAND */
-	ucd.cmd[1] = len ? 0x40 : 0x00;		/* flags: R (data in) */
+	ucd.cmd[1] = dir == 1 ? 0x40 : dir == 2 ? 0x80 : 0x00;	/* flags: R / W */
 	ucd.cmd[2] = lun;
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[12] = len >> 24;
@@ -103,7 +104,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 		ucd.cmd[16 + i] = cdb[i];
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
-	utrl[0].dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);	/* UFS storage, dev->host */
+	utrl[0].dw0 = (1u << 28) | ((uint32_t)dir << 25) | (1u << 24);	/* UFS storage, dir per JEDEC */
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
@@ -135,11 +136,67 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	return *status_out ? 4 : 0;
 }
 
+static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
+    uint32_t *ocs_out, uint32_t *status_out)
+{
+	return scsi_dir(lun, cdb, cdb_len, buf, len, ocs_out, status_out, len ? 1 : 0);
+}
+
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
 	uint8_t cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
 	uint32_t ocs, st;
 	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
+}
+
+static uint32_t write_blocks(uint32_t lba, uint32_t count, const void *buf)
+{
+	uint8_t cdb[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
+	uint32_t ocs, st;
+	return scsi_dir(0, cdb, sizeof(cdb), (void *)buf, count * BLOCK, &ocs, &st, 2);
+}
+
+/* ---- boot log channel: markers land in the "minidump" partition ----
+ * minidump is Qualcomm's crash-dump scratch area (LUN0, byte 0x10000000,
+ * 128 MiB). Nothing else writes it; a 4 KiB block at LBA 0x10000 is ours.
+ */
+#define ULOG_LBA	0x3000UL	/* bk05: LUN0 16MB spare partition */
+static uint64_t ulog[512];	/* same index layout as IMEM dbg block */
+static int ulog_ready, ulog_tried;
+
+int ufs_log_init(void)
+{
+	ulog_tried = 1;
+	uint32_t hcs = ufs_rd(REG_HCS);
+	if (!(ufs_rd(REG_HCE) & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY))
+		return 1;
+	if (ufs_rd(REG_UTRLDBR))
+		return 2;
+	ufs_wr(REG_UTRLRSR, 0);
+	uintptr_t list = (uintptr_t)utrl;
+	ufs_wr(REG_UTRLBA, (uint32_t)list);
+	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
+	ufs_wr(REG_UTRLRSR, 1);
+	if (ufs_rd(REG_UTRLBA) != (uint32_t)list ||
+	    ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
+	    !(ufs_rd(REG_UTRLRSR) & 1))
+		return 3;
+	uint32_t ocs = 0, st = 0;
+	static const uint8_t tur[6] = { 0x00 };
+	for (int i = 0; i < 3; i++)
+		if (!scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st)) {
+			ulog_ready = 1;
+			return 0;
+		}
+	return 4;
+}
+
+void ulog_put(unsigned idx, uint64_t v)
+{
+	if (idx < 512)
+		ulog[idx] = v;
+	if (ulog_tried)
+		write_blocks(ULOG_LBA, 1, ulog);
 }
 
 static uint64_t le64(const uint8_t *p)

@@ -1,5 +1,32 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> DIPPER (Xiaomi Mi 8, SDM845) handoff — 2026-11-02 <<<
+
+**STATE: XNU kernel entry REACHED on dipper.** Verified by UFS debug log + on-screen XNU kprintf text.
+
+**Device/boot facts learned (observed, not guesses):**
+- Mi 8 `dipper`, Snapdragon 845, single `boot` partition (LUN4 sector 49152, 64MiB), no A/B boot slots on this MIUI 9.6.7 unit.
+- Fastboot ABL is unreliable (dies ~30-60s after entering fastboot; Windows BOS-desc queries crash it — fixed via `IgnoreBOSDescriptorQuery`/`IgnoreHWSerNum`/`SkipContainerIdQuery` registry flags under the device's `USB\VID_18D1&PID_D00D` key, see `C:\tools\fb.py` + notes in `C:\ios-dipper\`).
+- **EDL/9008 is the reliable channel**: `fb.py oem-edl` from a LIVE fastboot (must be within ~30s of entering), then `edl.py` (bkerler) with the official `prog_ufs_firehose_sdm845_ddr.elf` from stock ROM at `C:\ios-dipper\rom\`. Xiaomi EDL auth succeeds with this loader.
+- **Stock kernel segment = `gzip(arm64 Image)` + raw appended FDTs.** ABL gunzips; custom images MUST ship kernel as `gzip(shim Image)` + appended Dipper FDTs, **boot header v0** (hv field 0; `--header_version 1` images were silently rejected → fastboot in <5s). Non-gzip kernels were also rejected. Modified stock (1-byte flip) boots far enough to hang (kernel crash) → signature not enforced when unlocked.
+- ABL hands DTB pointer in x0 = `0x84080000` on this unit; ramdisk loaded at `0x84280000`.
+- Debug channel: shim `dbg()` writes markers to IMEM **and** a 4KiB `ulog` block at **`bk05` partition (LUN0 LBA 0x3000)** via UFS host writes (`shim/ufs.c` `ufs_log_init`/`ulog_put`/`write_blocks`). Read with `edl.py rs 12288 1 out.bin --lun=0`. Index map in shim source (`0x00 magic='SHIMDBG'`, `0x01 dtb`, `0x02 stage0='STAGE'`, `0x10-0x1e loader`, `0x30-0x35 exception`, `0x5f reset`). Do NOT write `minidump` region (LUN0 0x10000) — it holds the QC ramdump TOC.
+- v0 packaging recipe: `mkbootimg.py --kernel shim-gz-dtb --ramdisk payload-dipper.bin --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 --second_offset 0xf00000 --tags_offset 0x100 --pagesize 4096 --cmdline "console=ttyMSM0,115200n8 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom"` (cmdline copied from stock; probably mostly ignored but keep it).
+
+**Boot log (2026-11-02, `out/shim-boot-gz.img`):**
+- Screen: red flash (shim con_clear) → black + 2 lines white text top-left (XNU kprintf; left edge clipped — console x/stride mismatch on this panel).
+- ulog: `dtb=0x84080000`, `STAGE`, `rd 0x84280000..0x85258120` (16.6MB payload), `phys=0x100000000`, `memsz=0x17ff00000` (~6GiB), `virt=0xfffffe0006000000`, `nsegs=10`, `entry=0xfffffe000748b488` (pa `0x10148b488`), boot-args at `0x1024cc000`, `JUMP` marker set, `xnu_ret` empty → **inside XNU**.
+- On-screen fragments ended `...intf initial` / `...ial mode spec...` → XNU kprintf/serial init region. Kernel is running; current state = unknown how far it got (likely hung or running headless-ish).
+- Earlier failures to note: all non-gz / v1-header images returned to fastboot in ~5s (ABL reject); a gzip'd raw stub hung at Mi logo (likely no arm64 header → ABL entry mismatch); instrumented gzip'd **shim Image boots and reaches XNU**.
+
+**Backups (never delete):** `C:\ios-dipper\backup\` — stock `boot.img` (verified restores Android), `recovery.img`, persist/persistbak, modemst1/2, fsg/fsc, devinfo, cdt, frp, vbmeta, dtbo, etc.
+
+**Next steps for dipper:**
+1. Fix console x-offset/stride (text clipped at left; can't read full kprintf lines) — check `shim/console.c` vs dipper fb (0x9d400000?, 1080x2248, stride?) — maybe panel is 1080 wide but fb stride differs, or notch margin.
+2. Re-run and read ulog + screen to find where XNU stalls (add kprintf capture or earlier UFS log hook inside loader path if needed).
+3. XNU early-boot platform init for SDM845 (GIC 0x17a00000/0x17a60000, timers, PSCI ok in shim, UFS host registers are same-family; see `PORT-DIPPER.md` at `C:\ios-dipper\` for the hardware map).
+4. Keep using `fastboot → oem-edl → edl.py` for all writes; keep `boot` writes reversible via `backup/boot.img`.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

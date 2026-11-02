@@ -103,6 +103,7 @@ static void delay_ms(unsigned ms)
 
 static void __attribute__((noreturn)) reset(unsigned after_s)
 {
+	dbg(0x5F, after_s);
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
@@ -142,6 +143,12 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 		irq_handler();
 		return;
 	}
+	dbg(0x30, slot);
+	dbg(0x31, rsr("esr_el1"));
+	dbg(0x32, rsr("elr_el1"));
+	dbg(0x33, rsr("far_el1"));
+	dbg(0x34, (uint64_t)regs[0]);
+	dbg(0x35, (uint64_t)(uintptr_t)stage);
 	con_clear(BLUE);
 	switch (slot & 3) {
 	case 0: con_str("PANIC", "SYNC"); break;
@@ -168,6 +175,7 @@ static uintptr_t find_gicr(void);
 void secondary_main(uint64_t idx)
 {
 	sec_mpidr[idx] = rsr("mpidr_el1") | (1ULL << 63);
+	dbg(0x40 + (idx & 7), rsr("mpidr_el1"));
 	if (idx == 1) {
 		uintptr_t r = find_gicr();
 		if (r) {
@@ -376,16 +384,23 @@ void shim_main(uint64_t dtb)
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
+	dbg(1, dtb);
+	dbg(2, 0x5354414745ULL);	/* 'STAGE' */
+	dbg(0xA, ufs_log_init());	/* UFS log channel up? rc shown in ulog[0xA] */
 	con_clear(RED);
+	dbg(3, 0x434f4e53545ULL);	/* 'CONST' console survived */
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 	con_skip();
 	const char *why = loader_boot(dtb);
+	dbg(4, (uint64_t)(uintptr_t)why);
 	con_str("LOADER", why);
 	con_skip();
 
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
+	dbg(5, 0x554653ULL);	/* 'UFS' */
 	test_ufs();
+	dbg(6, 0x554653444f4e45ULL);	/* 'UFSDONE' */
 	con_skip();
 	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
 	con_str("UFS", "probe done, reset in ~3 min");

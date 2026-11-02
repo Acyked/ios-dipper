@@ -80,25 +80,40 @@ const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
 
+	dbg(0x10, dtb);
 	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
-	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
+	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end)) {
+		dbg(0xE1, 0);
 		return "no initrd in /chosen";
+	}
+	dbg(0x11, rd_start);
+	dbg(0x12, rd_end);
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	const struct payload *p = (const struct payload *)rd_start;
-	if (!magic_ok(p->magic))
+	if (!magic_ok(p->magic)) {
+		dbg(0xE2, *(volatile const uint64_t *)rd_start);
 		return "no SWEETXNU payload";
-	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
+	}
+	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7)) {
+		dbg(0xE3, p->version);
 		return "bad payload header";
+	}
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
+	dbg(0x14, p->phys_base);
+	dbg(0x15, p->mem_size);
+	dbg(0x16, p->virt_base);
+	dbg(0x17, p->entry_va);
 	con_hex2("PHYS", "base=", p->phys_base, "size=", p->mem_size);
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
 
 	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
+	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size) {
+		dbg(0xE4, rd_end);
 		return "ramdisk overlaps kernel memory";
+	}
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
@@ -107,6 +122,8 @@ const char *loader_boot(uintptr_t dtb)
 		if (s->vmsize > s->file_size)
 			zero64(dst + ((s->file_size + 7) & ~7UL), s->vmsize - ((s->file_size + 7) & ~7UL));
 	}
+	dbg(0x18, p->nsegs);
+	dbg(0x19, p->kernel_end + pa_of_va_base);
 	con_hex2("SEGS", "n=", p->nsegs, "end=", p->kernel_end + pa_of_va_base);
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
@@ -137,11 +154,15 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
+	dbg(0x1B, ba_pa);
+	dbg(0x1C, entry_pa);
+	dbg(0x1D, 0xA11CE);
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 	((xnu_entry_t)entry_pa)(ba_pa);
+	dbg(0x1E, 0xBADBEEF);
 	return "xnu returned";
 }
